@@ -915,7 +915,8 @@ Choose an action:" 25 80 14 \
                         "4" "Import from local file" \
                         "5" "Deduplicate keys" \
                         "6" "View & delete key by line number" \
-                        "7" "Back" 3>&1 1>&2 2>&3)
+                        "7" "Generate new SSH key pair" \
+                        "8" "Back" 3>&1 1>&2 2>&3)
 
                       case "$ACTION_KEYS" in
                         1)
@@ -1050,7 +1051,95 @@ Choose an action:" 25 80 14 \
                             rm -f "$TEMP_VIEW"
                           fi
                           ;;
-                        7|"")
+                        7)
+                          # Generate new SSH key pair
+                          KEY_TYPE=$(whiptail --title "SSH Key Type" --menu "Choose key type:" 15 70 5 \
+                            "1" "ed25519 (recommended, modern)" \
+                            "2" "rsa 4096 (traditional, widely compatible)" \
+                            "3" "ecdsa 521" 3>&1 1>&2 2>&3)
+                          
+                          KEY_BITS=""
+                          case "$KEY_TYPE" in
+                            1) KEY_ALGO="ed25519" ;;
+                            2) KEY_ALGO="rsa"; KEY_BITS=4096 ;;
+                            3) KEY_ALGO="ecdsa"; KEY_BITS=521 ;;
+                            *) continue ;;
+                          esac
+                          
+                          KEY_COMMENT=$(whiptail --inputbox "Enter a comment/label for the key (e.g., email or device name):" 10 70 "$SELECTED_USER@$(hostname)" 3>&1 1>&2 2>&3)
+                          [[ -z "$KEY_COMMENT" ]] && KEY_COMMENT="$SELECTED_USER@$(hostname)"
+                          
+                          KEY_NAME=$(whiptail --inputbox "Enter filename for the key pair:" 10 70 "id_${KEY_ALGO}" 3>&1 1>&2 2>&3)
+                          [[ -z "$KEY_NAME" ]] && KEY_NAME="id_${KEY_ALGO}"
+                          
+                          KEY_PATH="$HOME_DIR/.ssh/$KEY_NAME"
+                          
+                          # Check if key already exists
+                          if [[ -f "$KEY_PATH" ]]; then
+                            if ! whiptail --yesno "⚠️  Key already exists at:\n$KEY_PATH\n\nOverwrite?" 10 70; then
+                              continue
+                            fi
+                          fi
+                          
+                          # Ask if key should have a passphrase
+                          if whiptail --yesno "Add a passphrase to the private key?\n\n• YES: More secure (requires passphrase to use)\n• NO: Convenient (no passphrase needed)" 12 70; then
+                            USE_PASSPHRASE="yes"
+                            PASSPHRASE=$(whiptail --passwordbox "Enter passphrase for private key:" 10 70 3>&1 1>&2 2>&3)
+                            if [[ -z "$PASSPHRASE" ]]; then
+                              msg "Cancelled" "Key generation cancelled - no passphrase provided."
+                              continue
+                            fi
+                          else
+                            USE_PASSPHRASE="no"
+                            PASSPHRASE=""
+                          fi
+                          
+                          # Generate the key
+                          log "Generating SSH key pair for $SELECTED_USER: $KEY_ALGO"
+                          
+                          if [[ "$USE_PASSPHRASE" == "yes" ]]; then
+                            # With passphrase
+                            if [[ -n "$KEY_BITS" ]]; then
+                              su - "$SELECTED_USER" -c "ssh-keygen -t $KEY_ALGO -b $KEY_BITS -C '$KEY_COMMENT' -f '$KEY_PATH' -N '$PASSPHRASE'" 2>/dev/null
+                            else
+                              su - "$SELECTED_USER" -c "ssh-keygen -t $KEY_ALGO -C '$KEY_COMMENT' -f '$KEY_PATH' -N '$PASSPHRASE'" 2>/dev/null
+                            fi
+                          else
+                            # Without passphrase
+                            if [[ -n "$KEY_BITS" ]]; then
+                              su - "$SELECTED_USER" -c "ssh-keygen -t $KEY_ALGO -b $KEY_BITS -C '$KEY_COMMENT' -f '$KEY_PATH' -N ''" 2>/dev/null
+                            else
+                              su - "$SELECTED_USER" -c "ssh-keygen -t $KEY_ALGO -C '$KEY_COMMENT' -f '$KEY_PATH' -N ''" 2>/dev/null
+                            fi
+                          fi
+                          
+                          if [[ -f "$KEY_PATH" && -f "${KEY_PATH}.pub" ]]; then
+                            # Set proper permissions
+                            chmod 600 "$KEY_PATH"
+                            chmod 644 "${KEY_PATH}.pub"
+                            chown "$SELECTED_USER":"$SELECTED_USER" "$KEY_PATH" "${KEY_PATH}.pub"
+                            
+                            # Ask if public key should be added to authorized_keys
+                            if whiptail --yesno "✓ SSH key pair generated successfully!\n\nPrivate key: $KEY_PATH\nPublic key: ${KEY_PATH}.pub\n\nAdd the public key to authorized_keys for this user?" 14 80; then
+                              cat "${KEY_PATH}.pub" >> "$AUTH_FILE"
+                              chown "$SELECTED_USER":"$SELECTED_USER" "$AUTH_FILE"
+                              chmod 600 "$AUTH_FILE"
+                              log "Added generated public key to authorized_keys for $SELECTED_USER"
+                              
+                              PUB_KEY_CONTENT=$(cat "${KEY_PATH}.pub")
+                              whiptail --title "SSH Key Generated & Added" --msgbox "✓ Key pair generated and public key added to authorized_keys!\n\nPrivate key: $KEY_PATH\nPublic key: ${KEY_PATH}.pub\n\n⚠️  IMPORTANT:\n• Download the PRIVATE key to your local machine\n• Keep it secure - anyone with this key can access the account\n• You can view the public key anytime: cat ${KEY_PATH}.pub\n\nPublic key:\n$PUB_KEY_CONTENT" 24 100
+                            else
+                              PUB_KEY_CONTENT=$(cat "${KEY_PATH}.pub")
+                              whiptail --title "SSH Key Generated" --msgbox "✓ Key pair generated successfully!\n\nPrivate key: $KEY_PATH\nPublic key: ${KEY_PATH}.pub\n\n⚠️  IMPORTANT:\n• Download the PRIVATE key to your local machine\n• Keep it secure\n• Add the public key to authorized_keys when ready\n\nPublic key:\n$PUB_KEY_CONTENT" 22 100
+                            fi
+                            
+                            log "SSH key pair generated for $SELECTED_USER: $KEY_PATH"
+                          else
+                            msg "Generation Failed" "Failed to generate SSH key pair.\n\nCheck $ERROR_LOG for details."
+                            log_error "SSH key generation failed for $SELECTED_USER"
+                          fi
+                          ;;
+                        8|"")
                           break
                           ;;
                       esac
